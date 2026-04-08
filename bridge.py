@@ -98,15 +98,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     (INCOMING / f"{msg_id}.txt").write_text(text, encoding="utf-8")
     print(f"[IN] {text[:80].encode('ascii', 'replace').decode()}")
 
-    # Send-Keys with retry
+    # Send-Keys with conditional retry (only if first attempt failed)
     prompt = f"[TELEGRAM:{msg_id}] Message: {text}"
-    send_keys(prompt)
+    sent = send_keys(prompt)
+    if not sent:
+        print("[WARN] Send-Keys failed on first attempt — will retry during wait")
 
-    # Wait for response, retrying Send-Keys periodically
+    # Wait for response, retrying Send-Keys ONLY if the first attempt failed.
+    # Unconditional retry would spam duplicate messages into the Claude window
+    # whenever the session takes >RETRY_INTERVAL to respond, which is normal
+    # for thinking-heavy replies.
     response = None
     target = OUTGOING / f"{msg_id}.txt"
     start = time.time()
     last_retry = start
+    retry_count = 0
+    max_retries = 2
     while time.time() - start < RESPONSE_TIMEOUT:
         if target.exists():
             await asyncio.sleep(0.5)
@@ -115,9 +122,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target.unlink()
                 response = content
                 break
-        if time.time() - last_retry >= RETRY_INTERVAL:
-            print("[RETRY] Re-sending via Send-Keys...")
-            send_keys(prompt)
+        # Retry only if the original send failed and we're under the retry cap
+        if not sent and retry_count < max_retries and time.time() - last_retry >= RETRY_INTERVAL:
+            retry_count += 1
+            print(f"[RETRY {retry_count}/{max_retries}] Re-sending via Send-Keys...")
+            retry_sent = send_keys(prompt)
+            if retry_sent:
+                sent = True  # success — stop retrying
             last_retry = time.time()
         await asyncio.sleep(1)
 
